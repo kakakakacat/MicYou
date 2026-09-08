@@ -69,6 +69,7 @@ impl Default for AudioOutputHandle {
         std::thread::spawn(move || {
             let mut manager = micyou_audio::AudioOutputManager::new();
             let mut muted = false;
+            let mut monitoring = false;
             let web_settings = initial_settings;
             let mut web_dsp: Option<micyou_audio::dsp::DspProcessor> = None;
 
@@ -80,6 +81,7 @@ impl Default for AudioOutputHandle {
                         } else {
                             match manager.start(device, buffer_ms) {
                                 Ok(()) => {
+                                    manager.set_monitoring(monitoring);
                                     log::info!("[Audio] Output device opened");
                                     true
                                 }
@@ -95,6 +97,7 @@ impl Default for AudioOutputHandle {
                         manager.close();
                         let ok = match manager.start(device, buffer_ms) {
                             Ok(()) => {
+                                manager.set_monitoring(monitoring);
                                 log::info!("[Audio] Output device switched");
                                 true
                             }
@@ -138,6 +141,7 @@ impl Default for AudioOutputHandle {
                         manager.push_sound_effect(samples, gain);
                     }
                     Ok(AudioOutputCommand::SetMonitoring(enabled)) => {
+                        monitoring = enabled;
                         manager.set_monitoring(enabled);
                     }
                     Ok(AudioOutputCommand::SetMuted(value)) => {
