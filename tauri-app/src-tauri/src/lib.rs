@@ -6,11 +6,6 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version, with the MicYou Plugin Exception.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
  */
 
 #![allow(unexpected_cfgs)]
@@ -41,8 +36,7 @@ pub mod vbcable;
 #[cfg(feature = "web-server")]
 pub mod web_server;
 
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use tauri::Manager;
 use tokio::sync::Mutex;
 
@@ -53,17 +47,14 @@ use stats::NetworkStats;
 #[allow(unexpected_cfgs)]
 fn apply_macos_vibrancy(win: &tauri::WebviewWindow) {
     use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
-
     let _ = apply_vibrancy(
         win,
         NSVisualEffectMaterial::Sidebar,
         Some(NSVisualEffectState::Active),
         None,
     );
-
     use objc::runtime::{Class, Object, NO};
     use objc::{msg_send, sel, sel_impl};
-
     if let Ok(ptr) = win.ns_window() {
         #[allow(unexpected_cfgs)]
         unsafe {
@@ -128,7 +119,6 @@ pub fn run() {
                 state.plugins.hotkeys.init(app.handle());
                 state.plugins.window.init(app.handle());
             }
-
             {
                 let plugins = app.state::<server::ServerState>().plugins.clone();
                 plugins.load_saved_plugins();
@@ -138,6 +128,7 @@ pub fn run() {
             {
                 let state = app.state::<server::ServerState>();
                 let dashboard_state = crate::dashboard_server::DashboardState {
+                    app: app.handle().clone(),
                     dsp_settings: state.dsp_settings.clone(),
                     is_monitoring: state.is_monitoring.clone(),
                     network_stats: state.network_stats.clone(),
@@ -161,6 +152,7 @@ pub fn run() {
                 apply_macos_vibrancy(&win);
             }
 
+            // Keep the virtual output device warm for the lifetime of the Core.
             {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
@@ -182,6 +174,52 @@ pub fn run() {
                     );
                     if started {
                         log::info!("[Audio] Virtual device ready at app startup");
+                    }
+                });
+            }
+
+            // Web-first startup: if the persisted connection mode is Web, start
+            // the phone HTTPS/WebSocket service without requiring the Tauri UI.
+            #[cfg(feature = "web-server")]
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    let prefs = crate::app_config::load_server_prefs();
+                    if prefs.mode != "web" {
+                        return;
+                    }
+                    let state = handle.state::<server::ServerState>();
+                    let already_running = state
+                        .web_server
+                        .lock()
+                        .await
+                        .as_ref()
+                        .is_some_and(|web| web.is_running());
+                    if already_running {
+                        return;
+                    }
+                    let events: crate::events::SharedEvents =
+                        Arc::new(crate::events::TauriEventSink(handle.clone()));
+                    let output =
+                        crate::commands::system::normalize_output_device(&prefs.output_device);
+                    let resource_dir = handle.path().resource_dir().ok();
+                    match crate::commands::system::start_server_inner(
+                        state.inner(),
+                        prefs.web_port,
+                        "web".to_string(),
+                        Some("0.0.0.0".to_string()),
+                        output,
+                        resource_dir,
+                        events,
+                    )
+                    .await
+                    {
+                        Ok(message) => {
+                            crate::audio_output::set_web_dsp_active(true);
+                            log::info!(target: "web-first", "{message}");
+                        }
+                        Err(e) => log::warn!(target: "web-first", "auto-start failed: {e}"),
                     }
                 });
             }
@@ -269,6 +307,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                crate::audio_output::set_web_dsp_active(false);
                 let state = app_handle.state::<server::ServerState>();
                 commands::system::shutdown_audio_output(state.inner());
             }
