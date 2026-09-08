@@ -1,0 +1,10 @@
+{
+  "name": "MicYou Web Microphone",
+  "short_name": "MicYou",
+  "description": "Use a phone browser as a low-latency microphone for MicYou.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#111418",
+  "theme_color": "#111418"
+}
