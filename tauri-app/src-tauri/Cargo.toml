@@ -24,6 +24,8 @@ web-server = [
   "dep:rustls",
   "dep:tokio-rustls",
   "dep:rustls-pemfile",
+  "dep:rand",
+  "dep:qrcode",
 ]
 
 [dependencies]
@@ -80,13 +82,14 @@ reqwest = { version = "0.13.4", features = ["json", "blocking"] }
 arboard = "3.4"
 md-5 = "0.11.0"
 
-
 # Web server (optional)
 axum = { version = "0.8", features = ["ws"], optional = true }
 rcgen = { version = "0.13", optional = true }
 rustls = { version = "0.23", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 rustls-pemfile = { version = "2", optional = true }
+rand = { version = "0.8", optional = true }
+qrcode = { version = "0.14", default-features = false, optional = true }
 tauri-plugin-global-shortcut = "2"
 
 [build-dependencies]
