@@ -6,11 +6,6 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version, with the MicYou Plugin Exception.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
  */
 
 use micyou_audio::dsp::AudioDspSettings;
@@ -18,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-/// Shared config directory (Windows: %APPDATA%\micyou, unix: XDG_CONFIG_HOME or ~/.config + micyou).
 pub fn config_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -38,28 +32,22 @@ pub fn config_dir() -> PathBuf {
         .join("micyou")
 }
 
-/// settings.json: the DSP settings shared by GUI, CLI and TUI.
 pub fn settings_path() -> PathBuf {
     config_dir().join("settings.json")
 }
 
-/// ui.json: GUI UI preferences (language, theme color) that the TUI reads.
 pub fn ui_prefs_path() -> PathBuf {
     config_dir().join("ui.json")
 }
 
-/// theme.json: current GUI theme colors exported for the TUI.
 pub fn theme_path() -> PathBuf {
     config_dir().join("theme.json")
 }
 
-/// server.json: connection-level settings shared by GUI, CLI and TUI
-/// (port, mode, bind address, output device).
 pub fn server_prefs_path() -> PathBuf {
     config_dir().join("server.json")
 }
 
-/// Load DSP settings from settings.json, falling back to defaults.
 pub fn load_dsp_settings() -> AudioDspSettings {
     fs::read_to_string(settings_path())
         .ok()
@@ -71,7 +59,6 @@ pub fn load_dsp_settings() -> AudioDspSettings {
         .unwrap_or_default()
 }
 
-/// Persist DSP settings to settings.json (GUI, CLI and TUI share this file).
 pub fn save_dsp_settings(settings: &AudioDspSettings) -> Result<(), String> {
     let dir = config_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("create config dir failed: {e}"))?;
@@ -82,7 +69,6 @@ pub fn save_dsp_settings(settings: &AudioDspSettings) -> Result<(), String> {
     fs::write(settings_path(), json).map_err(|e| format!("write settings.json failed: {e}"))
 }
 
-/// Raw settings.json as a JSON value (for the CLI `settings get`).
 pub fn settings_json() -> serde_json::Value {
     fs::read_to_string(settings_path())
         .ok()
@@ -90,7 +76,6 @@ pub fn settings_json() -> serde_json::Value {
         .unwrap_or_else(|| serde_json::to_value(AudioDspSettings::default()).unwrap_or_default())
 }
 
-/// GUI UI preferences persisted to ui.json.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UiPrefs {
@@ -113,7 +98,6 @@ pub fn save_ui_prefs(prefs: &UiPrefs) -> Result<(), String> {
     fs::write(ui_prefs_path(), json).map_err(|e| format!("write ui.json failed: {e}"))
 }
 
-/// Theme colors exported from the GUI for the TUI.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ThemeColors {
@@ -141,21 +125,14 @@ pub fn save_theme_colors(colors: &ThemeColors) -> Result<(), String> {
     fs::write(theme_path(), json).map_err(|e| format!("write theme.json failed: {e}"))
 }
 
-/// Connection-level settings shared between the GUI, CLI and TUI.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ServerPrefs {
-    /// Streaming port for wifi/usb modes.
     pub port: u16,
-    /// Port for the web (https) mode.
     pub web_port: u16,
-    /// Connection mode: wifi | usb | web.
     pub mode: String,
-    /// Bind address ("0.0.0.0" when auto-bind).
     pub bind_address: String,
-    /// Whether to listen on all interfaces.
     pub auto_bind: bool,
-    /// Selected output audio device name.
     pub output_device: String,
 }
 
@@ -164,7 +141,9 @@ impl Default for ServerPrefs {
         Self {
             port: 8554,
             web_port: 8443,
-            mode: "wifi".to_string(),
+            // Web-first is the default for fresh installs. Existing server.json
+            // files keep their chosen Wi-Fi/USB mode unchanged.
+            mode: "web".to_string(),
             bind_address: "0.0.0.0".to_string(),
             auto_bind: true,
             output_device: String::new(),
@@ -172,7 +151,6 @@ impl Default for ServerPrefs {
     }
 }
 
-/// Load connection settings from server.json, falling back to defaults.
 pub fn load_server_prefs() -> ServerPrefs {
     fs::read_to_string(server_prefs_path())
         .ok()
@@ -180,7 +158,6 @@ pub fn load_server_prefs() -> ServerPrefs {
         .unwrap_or_default()
 }
 
-/// Persist connection settings to server.json (GUI, CLI and TUI share this file).
 pub fn save_server_prefs(prefs: &ServerPrefs) -> Result<(), String> {
     let dir = config_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("create config dir failed: {e}"))?;

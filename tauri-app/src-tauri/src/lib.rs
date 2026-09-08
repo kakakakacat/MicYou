@@ -6,11 +6,6 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version, with the MicYou Plugin Exception.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
  */
 
 #![allow(unexpected_cfgs)]
@@ -21,6 +16,8 @@ pub mod audio_output;
 pub mod audio_stream;
 pub mod blackhole;
 pub mod commands;
+#[cfg(feature = "web-server")]
+pub mod dashboard_server;
 pub mod events;
 pub mod jitter_buffer;
 pub mod mode_lock;
@@ -39,8 +36,7 @@ pub mod vbcable;
 #[cfg(feature = "web-server")]
 pub mod web_server;
 
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use tauri::Manager;
 use tokio::sync::Mutex;
 
@@ -51,19 +47,14 @@ use stats::NetworkStats;
 #[allow(unexpected_cfgs)]
 fn apply_macos_vibrancy(win: &tauri::WebviewWindow) {
     use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
-
-    // Apply native NSVisualEffectView frosted glass effect (Sidebar material)
     let _ = apply_vibrancy(
         win,
         NSVisualEffectMaterial::Sidebar,
         Some(NSVisualEffectState::Active),
         None,
     );
-
-    // Make NSWindow fully transparent so the vibrancy shows through
     use objc::runtime::{Class, Object, NO};
     use objc::{msg_send, sel, sel_impl};
-
     if let Ok(ptr) = win.ns_window() {
         #[allow(unexpected_cfgs)]
         unsafe {
@@ -123,37 +114,45 @@ pub fn run() {
                 log::warn!(target: "tray", "failed to build tray: {e}");
             }
 
-            // Scan the plugins directory and auto-enable plugins that were
-            // enabled in a previous session.
             {
                 let state = app.state::<server::ServerState>();
                 state.plugins.hotkeys.init(app.handle());
                 state.plugins.window.init(app.handle());
             }
-
-            // Scan & enable active plugins on startup
             {
                 let plugins = app.state::<server::ServerState>().plugins.clone();
                 plugins.load_saved_plugins();
             }
 
-            // Acquire the GUI mode lock so the CLI/TUI knows the GUI is running.
-            // A live terminal-mode lock does not block the GUI; the frontend
-            // reads `get_mode_status` to show the active mode notice.
+            #[cfg(feature = "web-server")]
+            {
+                let state = app.state::<server::ServerState>();
+                let dashboard_state = crate::dashboard_server::DashboardState {
+                    app: app.handle().clone(),
+                    dsp_settings: state.dsp_settings.clone(),
+                    is_monitoring: state.is_monitoring.clone(),
+                    network_stats: state.network_stats.clone(),
+                    audio_output: state.audio_output.clone(),
+                    plugins: state.plugins.clone(),
+                    web_server: state.web_server.clone(),
+                };
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = crate::dashboard_server::serve(dashboard_state).await {
+                        log::warn!(target: "dashboard", "dashboard stopped: {e}");
+                    }
+                });
+            }
+
             match crate::mode_lock::acquire(crate::mode_lock::RunMode::Gui) {
                 Ok(()) => log::info!(target: "mode", "GUI mode lock acquired"),
                 Err(e) => log::warn!(target: "mode", "GUI mode lock not acquired: {e}"),
             }
 
-            // Apply native macOS frosted glass vibrancy
             if let Some(win) = app.get_webview_window("main") {
                 apply_macos_vibrancy(&win);
             }
 
-            // Create the virtual audio device at program startup (PipeWire
-            // virtual sink/source on Linux + the cpal output stream). It stays
-            // open until the app exits; phone connect/disconnect and server
-            // start/stop never tear it down.
+            // Keep the virtual output device warm for the lifetime of the Core.
             {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
@@ -175,6 +174,52 @@ pub fn run() {
                     );
                     if started {
                         log::info!("[Audio] Virtual device ready at app startup");
+                    }
+                });
+            }
+
+            // Web-first startup: if the persisted connection mode is Web, start
+            // the phone HTTPS/WebSocket service without requiring the Tauri UI.
+            #[cfg(feature = "web-server")]
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    let prefs = crate::app_config::load_server_prefs();
+                    if prefs.mode != "web" {
+                        return;
+                    }
+                    let state = handle.state::<server::ServerState>();
+                    let already_running = state
+                        .web_server
+                        .lock()
+                        .await
+                        .as_ref()
+                        .is_some_and(|web| web.is_running());
+                    if already_running {
+                        return;
+                    }
+                    let events: crate::events::SharedEvents =
+                        Arc::new(crate::events::TauriEventSink(handle.clone()));
+                    let output =
+                        crate::commands::system::normalize_output_device(&prefs.output_device);
+                    let resource_dir = handle.path().resource_dir().ok();
+                    match crate::commands::system::start_server_inner(
+                        state.inner(),
+                        prefs.web_port,
+                        "web".to_string(),
+                        Some("0.0.0.0".to_string()),
+                        output,
+                        resource_dir,
+                        events,
+                    )
+                    .await
+                    {
+                        Ok(message) => {
+                            crate::audio_output::set_web_dsp_active(true);
+                            log::info!(target: "web-first", "{message}");
+                        }
+                        Err(e) => log::warn!(target: "web-first", "auto-start failed: {e}"),
                     }
                 });
             }
@@ -261,9 +306,8 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            // Tear down the persistent virtual audio device only when the
-            // process exits, never on server stop or connection close.
             if let tauri::RunEvent::Exit = event {
+                crate::audio_output::set_web_dsp_active(false);
                 let state = app_handle.state::<server::ServerState>();
                 commands::system::shutdown_audio_output(state.inner());
             }

@@ -68,7 +68,6 @@ pub fn get_audio_devices() -> Vec<String> {
     names
 }
 
-/// Whether the current desktop backend has a usable AEC reference capture path.
 pub const fn aec_supported() -> bool {
     !cfg!(target_os = "macos")
 }
@@ -79,7 +78,6 @@ pub fn update_audio_settings(
     mut settings: AudioDspSettings,
 ) -> Result<String, String> {
     settings.normalize();
-    // AEC must always run first in the processing chain
     if let Some(pos) = settings.processing_chain.iter().position(|s| s == "AEC") {
         if pos != 0 {
             let stage = settings.processing_chain.remove(pos);
@@ -91,28 +89,26 @@ pub fn update_audio_settings(
             if settings.aec_enabled && !current.aec_enabled && !aec_supported() {
                 return Err("AEC is not supported on macOS".to_string());
             }
-            // Persist to the shared settings.json so the CLI sees the same values
             crate::app_config::save_dsp_settings(&settings)
                 .map_err(|e| format!("Failed to persist settings: {e}"))?;
-            // Only update live state after validation and persistence succeed.
-            *current = settings;
-            state.plugins.broadcast_event(&micyou_plugin::PluginEvent::DspSettingsChanged);
+            *current = settings.clone();
+            // Keep the dedicated Web output-layer DSP in sync with the same
+            // settings file/state used by GUI, CLI and TUI.
+            state.audio_output.update_web_dsp_settings(settings);
+            state
+                .plugins
+                .broadcast_event(&micyou_plugin::PluginEvent::DspSettingsChanged);
             Ok("Settings updated".to_string())
         }
-        Err(e) => Err(format!("Failed to update settings: {}", e)),
+        Err(e) => Err(format!("Failed to update settings: {e}")),
     }
 }
 
-/// Whether the shared server.json exists (used by the GUI to migrate
-/// pre-sync localStorage values on first run of a new version).
 #[tauri::command]
 pub fn server_prefs_exists() -> bool {
     std::path::Path::new(&crate::app_config::server_prefs_path()).exists()
 }
 
-/// Current DSP settings.
-/// Prefers the shared settings.json so edits made by the CLI are reflected;
-/// falls back to the in-memory state when the file is unreadable.
 #[tauri::command]
 pub fn get_audio_settings(state: State<'_, ServerState>) -> Result<AudioDspSettings, String> {
     if std::path::Path::new(&crate::app_config::settings_path()).exists() {
@@ -122,10 +118,9 @@ pub fn get_audio_settings(state: State<'_, ServerState>) -> Result<AudioDspSetti
         .dsp_settings
         .read()
         .map(|s| s.clone())
-        .map_err(|e| format!("Failed to read settings: {}", e))
+        .map_err(|e| format!("Failed to read settings: {e}"))
 }
 
-/// Connection-level settings shared with the CLI (server.json).
 #[tauri::command]
 pub fn get_server_prefs() -> crate::app_config::ServerPrefs {
     crate::app_config::load_server_prefs()
@@ -144,13 +139,21 @@ pub async fn set_mute_state(
     is_muted: bool,
 ) -> Result<(), String> {
     state.network_stats.set_muted(is_muted);
-    state.plugins.broadcast_event(&micyou_plugin::PluginEvent::MuteChanged { muted: is_muted });
+    // Final-output mute is transport-independent and therefore covers Web.
+    state.audio_output.set_muted(is_muted);
+    state
+        .plugins
+        .broadcast_event(&micyou_plugin::PluginEvent::MuteChanged { muted: is_muted });
     let _ = app.emit("mute-state-changed", is_muted);
 
+    // Preserve the existing Android control message so phone-side mute state
+    // remains synchronized in Wi-Fi/USB modes.
     let mute_msg = micyou_protocol::micyou::MessageWrapper {
         audio_packet: None,
         connect: None,
-        mute: Some(micyou_protocol::micyou::MuteMessage { is_muted: Some(is_muted) }),
+        mute: Some(micyou_protocol::micyou::MuteMessage {
+            is_muted: Some(is_muted),
+        }),
         ping: None,
         pong: None,
         plugin_message: None,
@@ -177,7 +180,10 @@ pub struct StreamingStatus {
 #[tauri::command]
 pub async fn get_streaming_status(state: State<'_, ServerState>) -> Result<StreamingStatus, String> {
     let lifecycle = state.lifecycle.lock().await;
-    let is_server_running = matches!(lifecycle.phase(), crate::server::ServerLifecyclePhase::Running);
+    let is_server_running = matches!(
+        lifecycle.phase(),
+        crate::server::ServerLifecyclePhase::Running
+    );
     let is_connected = {
         let conn_lock = state.active_connection.lock().await;
         let audio_active = state
@@ -213,12 +219,13 @@ pub async fn set_monitoring(
     state: State<'_, ServerState>,
     enabled: bool,
 ) -> Result<(), String> {
-    use tauri::Emitter;
     state
         .is_monitoring
         .store(enabled, std::sync::atomic::Ordering::Relaxed);
     state.audio_output.set_monitoring(enabled);
-    state.plugins.broadcast_event(&micyou_plugin::PluginEvent::MonitoringChanged { enabled });
+    state
+        .plugins
+        .broadcast_event(&micyou_plugin::PluginEvent::MonitoringChanged { enabled });
     let _ = app.emit("monitoring-enabled-changed", enabled);
     Ok(())
 }

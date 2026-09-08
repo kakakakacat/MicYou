@@ -1,0 +1,12 @@
+{
+  "name": "MicYou Web Microphone",
+  "short_name": "MicYou",
+  "description": "Pair a phone browser with MicYou Core and use it as a low-latency PC microphone.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#111418",
+  "theme_color": "#111418",
+  "categories": ["utilities", "music"]
+}

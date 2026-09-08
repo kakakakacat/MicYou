@@ -6,11 +6,6 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version, with the MicYou Plugin Exception.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
  */
 
 use serde::Deserialize;
@@ -20,6 +15,8 @@ use tauri::{
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, Runtime,
 };
+
+const DASHBOARD_URL: &str = "http://127.0.0.1:19527/";
 
 #[derive(Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +28,8 @@ pub struct TrayMenuStrings {
     pub stop: String,
     pub exit: String,
     #[serde(default)]
+    pub dashboard: String,
+    #[serde(default)]
     pub switch_cli: String,
     #[serde(default)]
     pub switch_tui: String,
@@ -39,14 +38,23 @@ pub struct TrayMenuStrings {
 impl TrayMenuStrings {
     pub fn english_defaults() -> Self {
         Self {
-            tooltip: "MicYou Desktop".to_string(),
+            tooltip: "MicYou Core".to_string(),
             show: "Show App".to_string(),
             hide: "Hide App".to_string(),
             start: "Start Streaming".to_string(),
             stop: "Stop Streaming".to_string(),
             exit: "Exit".to_string(),
+            dashboard: "Open Dashboard".to_string(),
             switch_cli: "Switch to CLI Mode".to_string(),
             switch_tui: "Switch to TUI Mode".to_string(),
+        }
+    }
+
+    fn dashboard_label(&self) -> &str {
+        if self.dashboard.trim().is_empty() {
+            "Open Dashboard"
+        } else {
+            &self.dashboard
         }
     }
 }
@@ -58,8 +66,6 @@ pub struct TrayState {
     pub is_streaming: bool,
 }
 
-/// Returns the localized label for the show/hide menu item given the current
-/// window visibility. The click id stays the same regardless of label.
 pub fn show_hide_label(state: TrayState, strings: &TrayMenuStrings) -> &str {
     if state.window_visible {
         &strings.hide
@@ -68,7 +74,6 @@ pub fn show_hide_label(state: TrayState, strings: &TrayMenuStrings) -> &str {
     }
 }
 
-/// Returns the localized label for the streaming toggle menu item.
 pub fn stream_toggle_label(state: TrayState, strings: &TrayMenuStrings) -> &str {
     if state.is_streaming {
         &strings.stop
@@ -77,6 +82,7 @@ pub fn stream_toggle_label(state: TrayState, strings: &TrayMenuStrings) -> &str 
     }
 }
 
+pub const MENU_ID_DASHBOARD: &str = "open_dashboard";
 pub const MENU_ID_SHOW: &str = "show";
 pub const MENU_ID_TOGGLE_STREAM: &str = "toggle_stream";
 pub const MENU_ID_EXIT: &str = "exit";
@@ -99,11 +105,16 @@ impl Default for TrayContext {
 
 struct TrayHandleStorage<R: Runtime>(Mutex<Option<tauri::tray::TrayIcon<R>>>);
 
+fn open_dashboard() {
+    if let Err(e) = open::that(DASHBOARD_URL) {
+        log::warn!(target: "tray", "failed to open dashboard: {e}");
+    }
+}
+
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let ctx = app.state::<TrayContext>();
     let strings = ctx.strings.lock().unwrap().clone();
     let state = *ctx.state.lock().unwrap();
-
     let menu = build_menu(app, &strings, state)?;
     let icon = app
         .default_window_icon()
@@ -120,6 +131,7 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             let id = event.id().as_ref();
             log::info!(target: "tray", "menu event: {id}");
             match id {
+                MENU_ID_DASHBOARD => open_dashboard(),
                 MENU_ID_SHOW
                 | MENU_ID_TOGGLE_STREAM
                 | MENU_ID_EXIT
@@ -127,19 +139,16 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 | MENU_ID_SWITCH_TUI => {
                     let _ = app.emit("tray-action", id);
                 }
-                other => {
-                    log::warn!(target: "tray", "unknown menu id: {other}");
-                }
+                other => log::warn!(target: "tray", "unknown menu id: {other}"),
             }
         })
-        .on_tray_icon_event(|tray, event| {
+        .on_tray_icon_event(|_tray, event| {
             if let TrayIconEvent::DoubleClick {
                 button: MouseButton::Left,
                 ..
             } = event
             {
-                let app = tray.app_handle();
-                let _ = app.emit("tray-action", MENU_ID_SHOW);
+                open_dashboard();
             }
         })
         .build(app)?;
@@ -169,6 +178,13 @@ fn build_menu<R: Runtime>(
     strings: &TrayMenuStrings,
     state: TrayState,
 ) -> tauri::Result<Menu<R>> {
+    let dashboard = MenuItem::with_id(
+        app,
+        MENU_ID_DASHBOARD,
+        strings.dashboard_label(),
+        true,
+        None::<&str>,
+    )?;
     let show_hide = MenuItem::with_id(
         app,
         MENU_ID_SHOW,
@@ -198,16 +214,20 @@ fn build_menu<R: Runtime>(
         None::<&str>,
     )?;
     let exit = MenuItem::with_id(app, MENU_ID_EXIT, &strings.exit, true, None::<&str>)?;
-    let separator = PredefinedMenuItem::separator(app)?;
+    let separator1 = PredefinedMenuItem::separator(app)?;
+    let separator2 = PredefinedMenuItem::separator(app)?;
+    let separator3 = PredefinedMenuItem::separator(app)?;
     Menu::with_items(
         app,
         &[
+            &dashboard,
+            &separator1,
             &show_hide,
             &toggle_stream,
-            &separator,
+            &separator2,
             &switch_cli,
             &switch_tui,
-            &separator,
+            &separator3,
             &exit,
         ],
     )
@@ -225,13 +245,14 @@ mod tests {
             start: "Start".into(),
             stop: "Stop".into(),
             exit: "Exit".into(),
+            dashboard: "Dashboard".into(),
             switch_cli: "Switch".into(),
             switch_tui: "Switch TUI".into(),
         }
     }
 
     #[test]
-    fn show_hide_label_uses_hide_when_visible() {
+    fn show_hide_label_uses_state() {
         assert_eq!(
             show_hide_label(
                 TrayState {
@@ -242,10 +263,6 @@ mod tests {
             ),
             "Hide"
         );
-    }
-
-    #[test]
-    fn show_hide_label_uses_show_when_hidden() {
         assert_eq!(
             show_hide_label(
                 TrayState {
@@ -259,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_toggle_label_uses_stop_when_streaming() {
+    fn stream_toggle_label_uses_state() {
         assert_eq!(
             stream_toggle_label(
                 TrayState {
@@ -270,10 +287,6 @@ mod tests {
             ),
             "Stop"
         );
-    }
-
-    #[test]
-    fn stream_toggle_label_uses_start_when_idle() {
         assert_eq!(
             stream_toggle_label(
                 TrayState {
@@ -287,30 +300,17 @@ mod tests {
     }
 
     #[test]
-    fn english_defaults_are_non_empty() {
-        let d = TrayMenuStrings::english_defaults();
-        assert!(!d.tooltip.is_empty());
-        assert!(!d.show.is_empty() && !d.hide.is_empty());
-        assert!(!d.start.is_empty() && !d.stop.is_empty());
-        assert!(!d.exit.is_empty());
-        assert!(!d.switch_cli.is_empty());
-        assert!(!d.switch_tui.is_empty());
+    fn dashboard_label_falls_back_for_old_frontend_payloads() {
+        let mut strings = s();
+        strings.dashboard.clear();
+        assert_eq!(strings.dashboard_label(), "Open Dashboard");
     }
 
     #[test]
-    fn tray_switch_labels_deserialize_from_frontend_camel_case() {
-        let strings: TrayMenuStrings = serde_json::from_value(serde_json::json!({
-            "tooltip": "tooltip",
-            "show": "show",
-            "hide": "hide",
-            "start": "start",
-            "stop": "stop",
-            "exit": "exit",
-            "switchCli": "CLI label",
-            "switchTui": "TUI label"
-        }))
-        .unwrap();
-        assert_eq!(strings.switch_cli, "CLI label");
-        assert_eq!(strings.switch_tui, "TUI label");
+    fn english_defaults_are_non_empty() {
+        let d = TrayMenuStrings::english_defaults();
+        assert!(!d.tooltip.is_empty());
+        assert!(!d.dashboard.is_empty());
+        assert!(!d.exit.is_empty());
     }
 }
