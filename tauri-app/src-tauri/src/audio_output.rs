@@ -30,6 +30,7 @@ enum AudioOutputCommand {
     Push(Vec<f32>, usize),
     PushSound(Vec<f32>, f32),
     SetMonitoring(bool),
+    SetMuted(bool),
     Queued(Sender<usize>),
     Shutdown,
 }
@@ -43,6 +44,7 @@ impl Default for AudioOutputHandle {
         let (tx, rx) = mpsc::channel::<AudioOutputCommand>();
         std::thread::spawn(move || {
             let mut manager = micyou_audio::AudioOutputManager::new();
+            let mut muted = false;
             loop {
                 match rx.recv() {
                     Ok(AudioOutputCommand::Open(device, buffer_ms, reply)) => {
@@ -62,14 +64,23 @@ impl Default for AudioOutputHandle {
                         };
                         let _ = reply.send(ok);
                     }
-                    Ok(AudioOutputCommand::Push(data, channels)) => {
+                    Ok(AudioOutputCommand::Push(mut data, channels)) => {
+                        if muted {
+                            data.fill(0.0);
+                        }
                         manager.push_audio_data(&data, channels);
                     }
-                    Ok(AudioOutputCommand::PushSound(samples, gain)) => {
+                    Ok(AudioOutputCommand::PushSound(mut samples, gain)) => {
+                        if muted {
+                            samples.fill(0.0);
+                        }
                         manager.push_sound_effect(samples, gain);
                     }
                     Ok(AudioOutputCommand::SetMonitoring(enabled)) => {
                         manager.set_monitoring(enabled);
+                    }
+                    Ok(AudioOutputCommand::SetMuted(value)) => {
+                        muted = value;
                     }
                     Ok(AudioOutputCommand::Queued(reply)) => {
                         let _ = reply.send(manager.queued_samples());
@@ -111,13 +122,19 @@ impl AudioOutputHandle {
         let _ = self.tx.send(AudioOutputCommand::Push(data, channels));
     }
 
-    /// Queue a plugin sound effect; mixed into the virtual mic output stream
+    /// Queue a plugin sound effect; mixed into the virtual mic output stream.
     pub fn push_sound(&self, samples: Vec<f32>, gain: f32) {
         let _ = self.tx.send(AudioOutputCommand::PushSound(samples, gain));
     }
 
     pub fn set_monitoring(&self, enabled: bool) {
         let _ = self.tx.send(AudioOutputCommand::SetMonitoring(enabled));
+    }
+
+    /// Mute is applied at the final virtual-microphone output layer so it works
+    /// for Android, Web and future transports consistently.
+    pub fn set_muted(&self, muted: bool) {
+        let _ = self.tx.send(AudioOutputCommand::SetMuted(muted));
     }
 
     /// Samples currently queued in the output ring buffer.
