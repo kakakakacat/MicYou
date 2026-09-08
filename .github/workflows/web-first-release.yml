@@ -1,0 +1,77 @@
+name: Web-first Release
+
+on:
+  workflow_run:
+    workflows: ["Development Build"]
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'web-first-mvp'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep '^project.version=' gradle.properties | cut -d'=' -f2 | tr -d '\r')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=web-first-v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download desktop build artifacts
+        uses: actions/download-artifact@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+          pattern: MicYou-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Remove Android debug artifact
+        shell: bash
+        run: |
+          find release-assets -type f -name '*.apk' -delete
+          find release-assets -type f -maxdepth 1 -print
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          NOTES=$(cat <<'EOF'
+          MicYou Web-first desktop release.
+
+          After installation, launch MicYou and open the local Dashboard. The Web microphone service starts automatically in Web mode. Pair a phone by scanning the QR code shown in the Dashboard, grant microphone permission, then select MicYou's virtual microphone in your desktop app.
+
+          Packages:
+          - Windows: installer EXE
+          - macOS Apple Silicon: DMG
+          - Linux: AppImage, DEB, RPM
+
+          Note: the phone-side microphone page uses a local self-signed HTTPS certificate, so the first connection may require accepting the certificate warning in the phone browser.
+          EOF
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* \
+              --title "MicYou Web-first v$VERSION" \
+              --notes "$NOTES" \
+              --target "$HEAD_SHA"
+          fi
