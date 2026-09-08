@@ -73,6 +73,7 @@ struct BoolControl { enabled: bool }
 
 async fn set_mute(State(state): State<DashboardState>, Json(body): Json<BoolControl>) -> Json<Value> {
     state.network_stats.set_muted(body.enabled);
+    state.audio_output.set_muted(body.enabled);
     state.plugins.broadcast_event(&micyou_plugin::PluginEvent::MuteChanged { muted: body.enabled });
     Json(json!({"ok": true, "muted": body.enabled}))
 }
