@@ -16,6 +16,8 @@ use tauri::{
     AppHandle, Emitter, Manager, Runtime,
 };
 
+const DASHBOARD_URL: &str = "http://127.0.0.1:19527/";
+
 #[derive(Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TrayMenuStrings {
@@ -104,10 +106,7 @@ impl Default for TrayContext {
 struct TrayHandleStorage<R: Runtime>(Mutex<Option<tauri::tray::TrayIcon<R>>>);
 
 fn open_dashboard() {
-    if let Err(e) = open::that(format!(
-        "http://127.0.0.1:{}/",
-        crate::dashboard_server::DASHBOARD_PORT
-    )) {
+    if let Err(e) = open::that(DASHBOARD_URL) {
         log::warn!(target: "tray", "failed to open dashboard: {e}");
     }
 }
@@ -143,13 +142,12 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 other => log::warn!(target: "tray", "unknown menu id: {other}"),
             }
         })
-        .on_tray_icon_event(|tray, event| {
+        .on_tray_icon_event(|_tray, event| {
             if let TrayIconEvent::DoubleClick {
                 button: MouseButton::Left,
                 ..
             } = event
             {
-                let _ = tray;
                 open_dashboard();
             }
         })
