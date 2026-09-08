@@ -161,7 +161,7 @@ It performs:
 - `cargo check -p micyou-app --all-targets`
 - Web server unit tests
 
-The fork may require GitHub Actions to be enabled once from the repository's Actions page before fork workflows will execute.
+The fork's GitHub Actions are active; this workflow runs on the Web-first branch and on pull requests targeting `master`.
 
 ## Files introduced or materially changed
 
