@@ -16,17 +16,9 @@
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 
-/// Persistent audio output device thread.
-///
-/// `cpal::Stream` is deliberately `!Send + !Sync`, so the
-/// `AudioOutputManager` can never live inside the shared `ServerState`.
-/// Instead a dedicated thread owns it for the whole process lifetime and
-/// receives commands over an mpsc channel. The device is opened at app
-/// startup (GUI) or on the first server start (CLI/TUI) and only closed when
-/// the process exits — server stop and phone connect/disconnect never tear it
-/// down.
 enum AudioOutputCommand {
     Open(Option<String>, usize, Sender<bool>),
+    Reopen(Option<String>, usize, Sender<bool>),
     Push(Vec<f32>, usize),
     PushSound(Vec<f32>, f32),
     SetMonitoring(bool),
@@ -64,6 +56,20 @@ impl Default for AudioOutputHandle {
                         };
                         let _ = reply.send(ok);
                     }
+                    Ok(AudioOutputCommand::Reopen(device, buffer_ms, reply)) => {
+                        manager.close();
+                        let ok = match manager.start(device, buffer_ms) {
+                            Ok(()) => {
+                                log::info!("[Audio] Output device switched");
+                                true
+                            }
+                            Err(e) => {
+                                eprintln!("[Audio] Failed to switch output device: {}", e);
+                                false
+                            }
+                        };
+                        let _ = reply.send(ok);
+                    }
                     Ok(AudioOutputCommand::Push(mut data, channels)) => {
                         if muted {
                             data.fill(0.0);
@@ -97,13 +103,10 @@ impl Default for AudioOutputHandle {
 }
 
 impl AudioOutputHandle {
-    /// Spawn the persistent device thread and return a shared handle.
     pub fn spawn() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// Blocking open of the output device. Idempotent: returns immediately if
-    /// the stream is already open.
     pub fn ensure_open(&self, device: Option<String>, buffer_ms: usize) -> bool {
         let (reply_tx, reply_rx) = mpsc::channel();
         if self
@@ -116,13 +119,22 @@ impl AudioOutputHandle {
         reply_rx.recv().unwrap_or(false)
     }
 
-    /// Push decoded PCM into the output ring buffer. The channel is unbounded,
-    /// so this never blocks or drops audio while the device thread lives.
+    pub fn reopen(&self, device: Option<String>, buffer_ms: usize) -> bool {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if self
+            .tx
+            .send(AudioOutputCommand::Reopen(device, buffer_ms, reply_tx))
+            .is_err()
+        {
+            return false;
+        }
+        reply_rx.recv().unwrap_or(false)
+    }
+
     pub fn push(&self, data: Vec<f32>, channels: usize) {
         let _ = self.tx.send(AudioOutputCommand::Push(data, channels));
     }
 
-    /// Queue a plugin sound effect; mixed into the virtual mic output stream.
     pub fn push_sound(&self, samples: Vec<f32>, gain: f32) {
         let _ = self.tx.send(AudioOutputCommand::PushSound(samples, gain));
     }
@@ -131,13 +143,12 @@ impl AudioOutputHandle {
         let _ = self.tx.send(AudioOutputCommand::SetMonitoring(enabled));
     }
 
-    /// Mute is applied at the final virtual-microphone output layer so it works
-    /// for Android, Web and future transports consistently.
+    /// Applied at the final virtual-microphone output layer so mute works for
+    /// Android, Web, USB and future transports consistently.
     pub fn set_muted(&self, muted: bool) {
         let _ = self.tx.send(AudioOutputCommand::SetMuted(muted));
     }
 
-    /// Samples currently queued in the output ring buffer.
     pub fn queued_samples(&self) -> usize {
         let (reply_tx, reply_rx) = mpsc::channel();
         if self.tx.send(AudioOutputCommand::Queued(reply_tx)).is_err() {
@@ -146,8 +157,6 @@ impl AudioOutputHandle {
         reply_rx.recv().unwrap_or(0)
     }
 
-    /// Close the output stream and stop the device thread. Only called when
-    /// the process is exiting.
     pub fn shutdown(&self) {
         let _ = self.tx.send(AudioOutputCommand::Shutdown);
     }
