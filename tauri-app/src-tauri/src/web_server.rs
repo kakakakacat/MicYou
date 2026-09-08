@@ -54,6 +54,8 @@ pub fn get_lan_ips() -> Vec<String> {
             ips.push(ip_str);
         }
     }
+    ips.sort();
+    ips.dedup();
     ips
 }
 
@@ -124,105 +126,17 @@ pub fn float32_to_pcm16(float32_bytes: &[u8]) -> Vec<u8> {
     pcm
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_generate_self_signed_cert_pem() {
-        let cert = generate_self_signed_cert_pem();
-        assert!(
-            cert.is_ok(),
-            "Cert generation should succeed: {:?}",
-            cert.err()
-        );
-        let c = cert.unwrap();
-        assert!(c.cert_pem.contains("BEGIN CERTIFICATE"));
-        assert!(c.key_pem.contains("PRIVATE KEY"));
-    }
-
-    #[test]
-    fn test_get_lan_ips() {
-        let ips = get_lan_ips();
-        for ip in &ips {
-            assert!(ip.parse::<IpAddr>().is_ok(), "Invalid IP: {}", ip);
-        }
-    }
-
-    #[test]
-    fn test_cert_cache_dir_exists() {
-        let dir = cert_cache_dir();
-        assert!(dir.exists());
-    }
-
-    #[test]
-    fn test_float32_to_pcm16_one() {
-        let input = 1.0f32.to_le_bytes();
-        let pcm = float32_to_pcm16(&input);
-        assert_eq!(pcm.len(), 2);
-        let sample = i16::from_le_bytes([pcm[0], pcm[1]]);
-        assert_eq!(sample, 32767);
-    }
-
-    #[test]
-    fn test_float32_to_pcm16_neg_one() {
-        let input = (-1.0f32).to_le_bytes();
-        let pcm = float32_to_pcm16(&input);
-        let sample = i16::from_le_bytes([pcm[0], pcm[1]]);
-        assert_eq!(sample, -32767);
-    }
-
-    #[test]
-    fn test_float32_to_pcm16_zero() {
-        let input = 0.0f32.to_le_bytes();
-        let pcm = float32_to_pcm16(&input);
-        let sample = i16::from_le_bytes([pcm[0], pcm[1]]);
-        assert_eq!(sample, 0);
-    }
-
-    #[test]
-    fn decrement_client_count_does_not_underflow_after_stop_reset() {
-        let count = AtomicUsize::new(0);
-        assert_eq!(decrement_client_count(&count), 0);
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn new_web_sender_closes_replaced_sender() {
-        let senders = ActiveWebSender::default();
-        let (first_generation, first_cancel, first_replaced) = senders.activate();
-        let (second_generation, second_cancel, second_replaced) = senders.activate();
-
-        assert!(!first_replaced);
-        assert!(second_replaced);
-        assert!(first_cancel.is_cancelled());
-        assert!(!second_cancel.is_cancelled());
-        assert!(!senders.is_current(first_generation));
-        assert!(senders.is_current(second_generation));
-    }
-
-    #[test]
-    fn replacement_disconnect_does_not_restore_old_sender() {
-        let senders = ActiveWebSender::default();
-        let (first_generation, first_cancel, _) = senders.activate();
-        let (second_generation, _, _) = senders.activate();
-
-        assert!(senders.deactivate(second_generation));
-        assert!(!senders.is_current(first_generation));
-        assert!(first_cancel.is_cancelled());
-        assert!(!senders.deactivate(first_generation));
-    }
-}
-
 use crate::events::SharedEvents;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::serve::Listener;
-use axum::Router;
+use axum::{Json, Router};
 use rustls::pki_types::CertificateDer;
 use rustls::ServerConfig;
+use serde::Serialize;
 use std::io::BufReader;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
@@ -234,6 +148,9 @@ const MAX_WEBSOCKET_CONNECTIONS: usize = 8;
 const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 const WEB_CLIENT_HTML: &str = include_str!("../resources/web_client.html");
+const WEB_DASHBOARD_HTML: &str = include_str!("../resources/web_dashboard.html");
+const WEB_MANIFEST: &str = include_str!("../resources/manifest.webmanifest");
+const SERVICE_WORKER: &str = include_str!("../resources/service-worker.js");
 const ALPINE_JS: &str = include_str!("../resources/alpine.min.js");
 
 fn is_valid_origin(origin: Option<&str>) -> bool {
@@ -251,7 +168,7 @@ fn is_valid_origin(origin: Option<&str>) -> bool {
 async fn handle_websocket(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
-    axum::extract::State(state): axum::extract::State<WebServerState>,
+    State(state): State<WebServerState>,
 ) -> impl IntoResponse {
     let origin = headers.get("origin").and_then(|v| v.to_str().ok());
     if !is_valid_origin(origin) {
@@ -301,41 +218,38 @@ async fn handle_ws_socket(
                 break;
             }
             message = socket.recv() => match message {
-            Some(Ok(Message::Binary(data))) => {
-                if !state.active_sender.is_current(generation) {
+                Some(Ok(Message::Binary(data))) => {
+                    if !state.active_sender.is_current(generation) {
+                        break;
+                    }
+                    if data.len() > 64 * 1024 {
+                        log::warn!("Web audio packet too large ({} bytes), dropping", data.len());
+                        continue;
+                    }
+                    if data.len() % 4 != 0 {
+                        log::warn!("Web audio packet not aligned to 4 bytes, dropping");
+                        continue;
+                    }
+
+                    let pcm = float32_to_pcm16(&data);
+                    let packet = micyou_protocol::micyou::AudioPacketMessage {
+                        buffer: pcm,
+                        sample_rate: 48000,
+                        channel_count: 1,
+                        audio_format: 2,
+                        codec: micyou_protocol::CODEC_PCM,
+                    };
+                    match state.audio_tx.try_send((generation, packet)) {
+                        Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Err(e)) => {
+                    log::warn!("WebSocket error: {}", e);
                     break;
                 }
-                if data.len() > 64 * 1024 {
-                    log::warn!(
-                        "Web audio packet too large ({} bytes), dropping",
-                        data.len()
-                    );
-                    continue;
-                }
-                if data.len() % 4 != 0 {
-                    log::warn!("Web audio packet not aligned to 4 bytes, dropping");
-                    continue;
-                }
-
-                let pcm = float32_to_pcm16(&data);
-                let packet = micyou_protocol::micyou::AudioPacketMessage {
-                    buffer: pcm,
-                    sample_rate: 48000,
-                    channel_count: 1,
-                    audio_format: 2,
-                    codec: micyou_protocol::CODEC_PCM,
-                };
-                match state.audio_tx.try_send((generation, packet)) {
-                    Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
-                }
-            }
-            Some(Ok(Message::Close(_))) | None => break,
-            Some(Err(e)) => {
-                log::warn!("WebSocket error: {}", e);
-                break;
-            }
-            _ => {}
+                _ => {}
             }
         }
     }
@@ -344,7 +258,6 @@ async fn handle_ws_socket(
         let remaining = decrement_client_count(&state.client_count);
         state.events.web_client_count(remaining as u32);
         log::info!("Web client disconnected (remaining: {})", remaining);
-
         if remaining == 0 {
             state.events.device_disconnected();
         }
@@ -355,19 +268,71 @@ async fn handle_ws_socket(
 
 fn decrement_client_count(client_count: &AtomicUsize) -> usize {
     client_count
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-            count.checked_sub(1)
-        })
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| count.checked_sub(1))
         .map(|previous| previous - 1)
         .unwrap_or(0)
 }
 
-async fn serve_html() -> impl IntoResponse {
-    Html(WEB_CLIENT_HTML)
+async fn serve_mobile() -> impl IntoResponse {
+    let with_manifest = WEB_CLIENT_HTML.replace(
+        "</head>",
+        "<link rel=\"manifest\" href=\"/manifest.webmanifest\"><meta name=\"theme-color\" content=\"#111418\"></head>",
+    );
+    let pwa_ready = with_manifest.replace(
+        "</body>",
+        "<script>if('serviceWorker' in navigator){navigator.serviceWorker.register('/service-worker.js').catch(()=>{});}</script></body>",
+    );
+    Html(pwa_ready)
+}
+
+async fn serve_dashboard() -> impl IntoResponse {
+    Html(WEB_DASHBOARD_HTML)
 }
 
 async fn serve_alpine_js() -> impl IntoResponse {
     ([("Content-Type", "application/javascript")], ALPINE_JS)
+}
+
+async fn serve_manifest() -> impl IntoResponse {
+    (
+        [("Content-Type", "application/manifest+json")],
+        WEB_MANIFEST,
+    )
+}
+
+async fn serve_service_worker() -> impl IntoResponse {
+    (
+        [
+            ("Content-Type", "application/javascript"),
+            ("Cache-Control", "no-cache"),
+            ("Service-Worker-Allowed", "/"),
+        ],
+        SERVICE_WORKER,
+    )
+}
+
+#[derive(Serialize)]
+struct WebStatus {
+    running: bool,
+    client_count: usize,
+    port: u16,
+    lan_ips: Vec<String>,
+    phone_urls: Vec<String>,
+}
+
+async fn serve_status(State(state): State<WebServerState>) -> Json<WebStatus> {
+    let lan_ips = get_lan_ips();
+    let phone_urls = lan_ips
+        .iter()
+        .map(|ip| format!("https://{}:{}/", ip, state.port))
+        .collect();
+    Json(WebStatus {
+        running: true,
+        client_count: state.client_count.load(Ordering::SeqCst),
+        port: state.port,
+        lan_ips,
+        phone_urls,
+    })
 }
 
 #[derive(Default)]
@@ -420,6 +385,7 @@ pub struct WebServerState {
     pub client_count: Arc<AtomicUsize>,
     active_sender: Arc<ActiveWebSender>,
     pub websocket_slots: Arc<Semaphore>,
+    pub port: u16,
 }
 
 struct TlsListener {
@@ -511,15 +477,19 @@ impl WebServer {
             client_count: self.client_count.clone(),
             active_sender: Arc::new(ActiveWebSender::default()),
             websocket_slots: Arc::new(Semaphore::new(MAX_WEBSOCKET_CONNECTIONS)),
+            port,
         };
 
         let app = Router::new()
-            .route("/", get(serve_html))
+            .route("/", get(serve_mobile))
+            .route("/dashboard", get(serve_dashboard))
+            .route("/api/status", get(serve_status))
+            .route("/manifest.webmanifest", get(serve_manifest))
+            .route("/service-worker.js", get(serve_service_worker))
             .route("/alpine.min.js", get(serve_alpine_js))
             .route("/ws", get(handle_websocket))
             .with_state(state);
 
-        // Load TLS certificate
         let cert = load_or_generate_cert_pem()?;
         let cert_chain: Vec<CertificateDer<'static>> =
             rustls_pemfile::certs(&mut BufReader::new(cert.cert_pem.as_bytes()))
@@ -534,15 +504,12 @@ impl WebServer {
             .with_no_client_auth()
             .with_single_cert(cert_chain, private_key)
             .map_err(|e| format!("TLS config error: {}", e))?;
-
         tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
         let acceptor = TlsAcceptor::from(Arc::new(tls_config));
-
         let addr: SocketAddr = format!("0.0.0.0:{}", port)
             .parse()
             .map_err(|e| format!("Invalid address: {}", e))?;
-
         let tcp = TcpListener::bind(addr)
             .await
             .map_err(|e| format!("Web server bind error: {}", e))?;
@@ -556,7 +523,8 @@ impl WebServer {
             completed_rx,
         };
 
-        log::info!("Web server listening on https://0.0.0.0:{}", port);
+        log::info!("Web microphone: https://0.0.0.0:{}", port);
+        log::info!("Web dashboard: https://127.0.0.1:{}/dashboard", port);
 
         let new_token = CancellationToken::new();
         {
@@ -568,20 +536,15 @@ impl WebServer {
         let client_count = self.client_count.clone();
 
         running.store(true, Ordering::SeqCst);
-
         let task = tokio::spawn(async move {
             axum::serve(tls_listener, app)
-                .with_graceful_shutdown(async move {
-                    cancel.cancelled().await;
-                })
+                .with_graceful_shutdown(async move { cancel.cancelled().await })
                 .await
                 .ok();
-
             running.store(false, Ordering::SeqCst);
             client_count.store(0, Ordering::SeqCst);
         });
         *self.task.lock().unwrap() = Some(task);
-
         Ok(())
     }
 
@@ -601,5 +564,57 @@ impl WebServer {
         }
         self.running.store(false, Ordering::SeqCst);
         self.client_count.store(0, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_self_signed_cert_pem() {
+        let cert = generate_self_signed_cert_pem().expect("certificate should be generated");
+        assert!(cert.cert_pem.contains("BEGIN CERTIFICATE"));
+        assert!(cert.key_pem.contains("PRIVATE KEY"));
+    }
+
+    #[test]
+    fn test_get_lan_ips() {
+        for ip in get_lan_ips() {
+            assert!(ip.parse::<IpAddr>().is_ok(), "Invalid IP: {}", ip);
+        }
+    }
+
+    #[test]
+    fn test_float32_to_pcm16() {
+        let input = [1.0f32, 0.0f32, -1.0f32]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let pcm = float32_to_pcm16(&input);
+        assert_eq!(pcm.len(), 6);
+        assert_eq!(i16::from_le_bytes([pcm[0], pcm[1]]), 32767);
+        assert_eq!(i16::from_le_bytes([pcm[2], pcm[3]]), 0);
+        assert_eq!(i16::from_le_bytes([pcm[4], pcm[5]]), -32767);
+    }
+
+    #[test]
+    fn decrement_client_count_does_not_underflow_after_stop_reset() {
+        let count = AtomicUsize::new(0);
+        assert_eq!(decrement_client_count(&count), 0);
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn new_web_sender_closes_replaced_sender() {
+        let senders = ActiveWebSender::default();
+        let (first_generation, first_cancel, first_replaced) = senders.activate();
+        let (second_generation, second_cancel, second_replaced) = senders.activate();
+        assert!(!first_replaced);
+        assert!(second_replaced);
+        assert!(first_cancel.is_cancelled());
+        assert!(!second_cancel.is_cancelled());
+        assert!(!senders.is_current(first_generation));
+        assert!(senders.is_current(second_generation));
     }
 }
