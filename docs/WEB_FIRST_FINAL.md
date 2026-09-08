@@ -5,7 +5,7 @@ This fork keeps MicYou's native Rust audio/virtual-device core and makes the bro
 ## Final shape
 
 ```text
-Phone browser / installed PWA
+Phone browser / home-screen launch
         |
         | HTTPS + paired WSS audio
         v
@@ -138,9 +138,11 @@ http://127.0.0.1:19527/
 
 The old Tauri window remains available during the transition, so existing functionality is not removed prematurely.
 
-## PWA notes
+## Browser/PWA assets
 
-The phone server exposes a manifest and service worker assets. The service worker deliberately avoids caching navigation, pairing pages, API calls, or WebSocket traffic; only static assets are eligible for caching so authentication state is never captured in an offline cache.
+The phone server exposes a Web App Manifest and a service worker asset. The service worker deliberately avoids caching navigation, pairing pages, API calls, or WebSocket traffic; only static assets are eligible for caching so authentication state is never captured in an offline cache.
+
+The core workflow does not depend on installation: opening the paired HTTPS page in the browser is sufficient. Browsers that offer **Add to Home Screen** can still be used for an app-like launch experience.
 
 The self-signed HTTPS certificate remains the main browser-onboarding compromise for a purely local solution. It is required because microphone capture is a secure-context browser API when accessed from another device on the LAN.
 
@@ -164,21 +166,19 @@ The fork may require GitHub Actions to be enabled once from the repository's Act
 ## Files introduced or materially changed
 
 ```text
-taure-app/src-tauri/src/dashboard_server.rs
-taure-app/src-tauri/src/web_server.rs
-taure-app/src-tauri/src/audio_output.rs
-taure-app/src-tauri/src/app_config.rs
-taure-app/src-tauri/src/tray.rs
-taure-app/src-tauri/src/lib.rs
-taure-app/src-tauri/src/commands/audio.rs
-taure-app/src-tauri/resources/dashboard_local.html
-taure-app/src-tauri/resources/manifest.webmanifest
-taure-app/src-tauri/resources/service-worker.js
+tauri-app/src-tauri/src/dashboard_server.rs
+tauri-app/src-tauri/src/web_server.rs
+tauri-app/src-tauri/src/audio_output.rs
+tauri-app/src-tauri/src/app_config.rs
+tauri-app/src-tauri/src/tray.rs
+tauri-app/src-tauri/src/lib.rs
+tauri-app/src-tauri/src/commands/audio.rs
+tauri-app/src-tauri/resources/dashboard_local.html
+tauri-app/src-tauri/resources/manifest.webmanifest
+tauri-app/src-tauri/resources/service-worker.js
 .github/workflows/web-first-ci.yml
 ```
 
-(`taure-app` above refers to the repository's `tauri-app` directory.)
-
 ## Migration policy
 
-The Android client, existing Tauri UI, CLI and TUI remain in the repository. Once the browser workflow has reached feature parity and has passed platform builds, the desktop window can be made optional and the installed product can be presented primarily as **MicYou Core + Tray + Web Dashboard**.
+The Android client, existing Tauri UI, CLI and TUI remain in the repository. Once the browser workflow has passed platform builds, the desktop window can be made optional and the installed product can be presented primarily as **MicYou Core + Tray + Web Dashboard**.
