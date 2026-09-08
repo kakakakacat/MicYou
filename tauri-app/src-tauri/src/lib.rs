@@ -21,6 +21,8 @@ pub mod audio_output;
 pub mod audio_stream;
 pub mod blackhole;
 pub mod commands;
+#[cfg(feature = "web-server")]
+pub mod dashboard_server;
 pub mod events;
 pub mod jitter_buffer;
 pub mod mode_lock;
@@ -52,7 +54,6 @@ use stats::NetworkStats;
 fn apply_macos_vibrancy(win: &tauri::WebviewWindow) {
     use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
 
-    // Apply native NSVisualEffectView frosted glass effect (Sidebar material)
     let _ = apply_vibrancy(
         win,
         NSVisualEffectMaterial::Sidebar,
@@ -60,7 +61,6 @@ fn apply_macos_vibrancy(win: &tauri::WebviewWindow) {
         None,
     );
 
-    // Make NSWindow fully transparent so the vibrancy shows through
     use objc::runtime::{Class, Object, NO};
     use objc::{msg_send, sel, sel_impl};
 
@@ -123,37 +123,44 @@ pub fn run() {
                 log::warn!(target: "tray", "failed to build tray: {e}");
             }
 
-            // Scan the plugins directory and auto-enable plugins that were
-            // enabled in a previous session.
             {
                 let state = app.state::<server::ServerState>();
                 state.plugins.hotkeys.init(app.handle());
                 state.plugins.window.init(app.handle());
             }
 
-            // Scan & enable active plugins on startup
             {
                 let plugins = app.state::<server::ServerState>().plugins.clone();
                 plugins.load_saved_plugins();
             }
 
-            // Acquire the GUI mode lock so the CLI/TUI knows the GUI is running.
-            // A live terminal-mode lock does not block the GUI; the frontend
-            // reads `get_mode_status` to show the active mode notice.
+            #[cfg(feature = "web-server")]
+            {
+                let state = app.state::<server::ServerState>();
+                let dashboard_state = crate::dashboard_server::DashboardState {
+                    dsp_settings: state.dsp_settings.clone(),
+                    is_monitoring: state.is_monitoring.clone(),
+                    network_stats: state.network_stats.clone(),
+                    audio_output: state.audio_output.clone(),
+                    plugins: state.plugins.clone(),
+                    web_server: state.web_server.clone(),
+                };
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = crate::dashboard_server::serve(dashboard_state).await {
+                        log::warn!(target: "dashboard", "dashboard stopped: {e}");
+                    }
+                });
+            }
+
             match crate::mode_lock::acquire(crate::mode_lock::RunMode::Gui) {
                 Ok(()) => log::info!(target: "mode", "GUI mode lock acquired"),
                 Err(e) => log::warn!(target: "mode", "GUI mode lock not acquired: {e}"),
             }
 
-            // Apply native macOS frosted glass vibrancy
             if let Some(win) = app.get_webview_window("main") {
                 apply_macos_vibrancy(&win);
             }
 
-            // Create the virtual audio device at program startup (PipeWire
-            // virtual sink/source on Linux + the cpal output stream). It stays
-            // open until the app exits; phone connect/disconnect and server
-            // start/stop never tear it down.
             {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
@@ -261,8 +268,6 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            // Tear down the persistent virtual audio device only when the
-            // process exits, never on server stop or connection close.
             if let tauri::RunEvent::Exit = event {
                 let state = app_handle.state::<server::ServerState>();
                 commands::system::shutdown_audio_output(state.inner());
